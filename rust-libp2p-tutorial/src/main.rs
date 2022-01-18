@@ -53,6 +53,20 @@ struct ListResponse {
     reciever: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+enum EventType {
+    Response(ListResponse),
+    Input(String),
+}
+
+#[derive(NetworkBehaviour)]
+struct RecipeBehaviour {
+    floodsub: Floodsub,
+    mdns: Mdns,
+    #[behaviour(ignore)]
+    respone_sender: mpsc::UnboundedSender<ListResponse>
+}
+
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
@@ -64,11 +78,37 @@ async fn main() {
         .into_authentic(&KEYS)
         .expect("can create auth keys");
 
-    //Handhake Noise secure comms and make nice nice!
-    //xx is interoperabality pilled
+    //Handhake Noise secure comms and secure auth in handshake
+    //xx is interoperabality with other tcp clients
     let transp = TokioTcpConfig::new()
         .upgrade(upgrade::Version::V1)
-        .authenticate(NoiseConfig::xx(auth_keys).into_authenticated())
-        .multiplex(mplex::MplexConfig::new())
+        .authenticate(NoiseConfig::xx(auth_keys).into_authenticated())  //auth here
+        .multiplex(mplex::MplexConfig::new())   //multiplex on same transport stream
         .boxed();
+
+    let mut behaviour = RecipeBehaviour {
+        floodsub: Floodsub::new(PEER_ID.clone()),   //awaits for events
+        mdns: Mdns::new(Default::default()) //resolve other peers on network
+            .await
+            .expect("can create mdns"),
+        response_sender,    //can propogate back events from local client
+    };
+
+    behaviour.floodsub.subscribe(TOPIC.clone());
+
+    let mut swarm = SwarmBuilder::new(transp, behaviour, PEER_ID.clone())   //manages connections using transport layer
+        .executor(Box::new(|fut| {
+            tokio::spawn(fut);  //tokio runtime for fut
+        }))
+        .build();
+
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+
+    Swarm::listen_on(
+        &mut swarm,
+        "/ip4/0.0.0.0/tcp/0"
+            .parse()
+            .expect("can get local socket"),
+    )
+    .expect("swarm can be started");
 }
