@@ -111,4 +111,37 @@ async fn main() {
             .expect("can get local socket"),
     )
     .expect("swarm can be started");
+
+    //event loop, listens to events from stdin from the swarm
+    loop {
+        let evt = {
+            tokio::select! {
+                line = stdin.next_line() => Some(EventType::Input(line.expect("can read line from stdin"))),
+                response = response_rcv.recv() => Some(EventType::Response(response.expect("response exists"))),
+                event = swarm.select_next_some() => {
+                    info!("Unhandled Swarm Event: {:?}", event);
+                    None
+                },
+            }
+        };
+        if let Some(event) = evt {
+            match event {
+                EventType::Response(resp) => {
+                    let json = serde_json::to_string(&resp).expect("can jsonify response");
+                    swarm
+                        .behaviour_mut()
+                        .floodsub
+                        .publish(TOPIC.clone(), json.as_bytes());
+                }
+                EventType::Input(line) => match line.as_str() {
+                    //handlers for recipes state
+                    "ls p" => handle_list_peers(&mut swarm).await,
+                    cmd if cmd.starts_with("ls r") => handle_list_recipes(cmd, &mut swarm).await,
+                    cmd if cmd.starts_with("create r") => handle_create_recipes(cmd) => handle_create_recipe(cmd).await,
+                    cmd if cmd.starts_with("publish r") => handle_publish_recipe(cmd).await,
+                    _ => error!("unknown command"),
+                },
+            }
+        }
+    }
 }
